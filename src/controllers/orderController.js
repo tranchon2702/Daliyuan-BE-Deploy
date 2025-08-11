@@ -3,7 +3,7 @@ const Product = require('../models/productModel');
 
 // @desc    Tạo đơn hàng mới
 // @route   POST /api/orders
-// @access  Public
+// @access  Private
 const createOrder = async (req, res) => {
   try {
     const {
@@ -19,6 +19,14 @@ const createOrder = async (req, res) => {
       note,
     } = req.body;
 
+    // Kiểm tra người dùng đã đăng nhập
+    if (!req.user) {
+      return res.status(401).json({ message: 'Cần đăng nhập để đặt hàng' });
+    }
+
+    console.log('🔍 createOrder - User ID:', req.user._id);
+    console.log('🔍 createOrder - User object:', req.user);
+
     // Kiểm tra thông tin đơn hàng
     if (orderItems && orderItems.length === 0) {
       return res.status(400).json({ message: 'Không có sản phẩm trong đơn hàng' });
@@ -26,7 +34,7 @@ const createOrder = async (req, res) => {
 
     // Tạo đơn hàng mới
     const order = new Order({
-      user: req.user ? req.user._id : null,
+      user: req.user._id,
       orderItems: orderItems.map(item => ({
         ...item,
         product: item.product,
@@ -197,6 +205,7 @@ const getOrders = async (req, res) => {
     const count = await Order.countDocuments({});
     const orders = await Order.find({})
       .populate('user', 'fullName email')
+      .populate('orderItems.product', 'code name nameZh') // ✅ Populate product để lấy mã sản phẩm
       .limit(pageSize)
       .skip(pageSize * (page - 1))
       .sort({ createdAt: -1 });
@@ -217,11 +226,21 @@ const getOrders = async (req, res) => {
 // @access  Private
 const getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.user._id }).sort({
-      createdAt: -1,
-    });
+    console.log('🔍 getMyOrders - User ID:', req.user._id);
+    console.log('🔍 getMyOrders - User object:', req.user);
+    
+    const orders = await Order.find({ user: req.user._id })
+      .populate('orderItems.product', 'code name nameZh') // ✅ Populate product data
+      .sort({
+        createdAt: -1,
+      });
+    
+    console.log('🔍 getMyOrders - Found orders count:', orders.length);
+    console.log('🔍 getMyOrders - Orders:', orders);
+    
     res.json(orders);
   } catch (error) {
+    console.error('❌ getMyOrders error:', error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -232,22 +251,77 @@ const getMyOrders = async (req, res) => {
 const searchOrders = async (req, res) => {
   try {
     const keyword = req.query.keyword;
+    const pageSize = Number(req.query.pageSize) || 10;
+    const page = Number(req.query.page) || 1;
     
     if (!keyword) {
       return res.status(400).json({ message: 'Vui lòng nhập từ khóa tìm kiếm' });
     }
     
     // Tìm kiếm theo ID đơn hàng hoặc thông tin khách hàng
-    const orders = await Order.find({
+    const searchQuery = {
       $or: [
         { _id: { $regex: keyword, $options: 'i' } },
         { 'shippingInfo.fullName': { $regex: keyword, $options: 'i' } },
         { 'shippingInfo.email': { $regex: keyword, $options: 'i' } },
         { 'shippingInfo.phone': { $regex: keyword, $options: 'i' } },
       ],
-    }).populate('user', 'fullName email');
+    };
+
+    const count = await Order.countDocuments(searchQuery);
+    const orders = await Order.find(searchQuery)
+      .populate('user', 'fullName email')
+      .populate('orderItems.product', 'code name nameZh') // ✅ Populate product trong search
+      .limit(pageSize)
+      .skip(pageSize * (page - 1))
+      .sort({ createdAt: -1 });
     
-    res.json(orders);
+    res.json({
+      orders,
+      page,
+      pages: Math.ceil(count / pageSize),
+      totalOrders: count,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Xóa đơn hàng
+// @route   DELETE /api/orders/:id
+// @access  Private/Admin
+const deleteOrder = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+
+    if (order) {
+      // Hoàn lại tồn kho nếu đơn hàng chưa giao
+      if (order.status !== 'Đã giao hàng') {
+        for (const item of order.orderItems) {
+          const product = await Product.findById(item.product);
+          if (product) {
+            // Hoàn lại tồn kho theo đơn vị
+            if (product.unitOptions && product.unitOptions.length > 0) {
+              const unitOption = product.unitOptions.find(
+                (option) => option.unitType === item.unitType
+              );
+              if (unitOption) {
+                unitOption.stock += item.qty;
+              }
+            }
+            
+            // Hoàn lại tổng tồn kho
+            product.stock += item.qty;
+            await product.save();
+          }
+        }
+      }
+
+      await Order.findByIdAndDelete(req.params.id);
+      res.json({ message: 'Đã xóa đơn hàng thành công' });
+    } else {
+      res.status(404).json({ message: 'Không tìm thấy đơn hàng' });
+    }
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -262,4 +336,5 @@ module.exports = {
   getOrders,
   getMyOrders,
   searchOrders,
+  deleteOrder,
 }; 

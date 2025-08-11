@@ -30,6 +30,14 @@ const productSchema = mongoose.Schema(
       type: String,
       default: '',
     },
+    shortDescription: {
+      type: String,
+      default: '',
+    },
+    shortDescriptionZh: {
+      type: String,
+      default: '',
+    },
     price: {
       type: Number,
       required: true,
@@ -39,12 +47,14 @@ const productSchema = mongoose.Schema(
       type: Number,
       default: 0,
     },
-    images: [
-      {
-        type: String,
-      },
-    ],
-    // Cập nhật schema để phù hợp với cấu trúc mới của imageVariants
+    // Ảnh chính - hiển thị trong list/card
+    mainImage: {
+      type: String,
+      required: true,
+    },
+    // Mảng ảnh chi tiết - hiển thị trong product detail page
+    images: [String],
+    // Variants cho optimization (giữ nguyên cho tương lai)
     imageVariants: [
       {
         original: String,
@@ -53,11 +63,6 @@ const productSchema = mongoose.Schema(
         mediumWebp: String
       }
     ],
-    mainImage: {
-      type: String,
-      required: true,
-    },
-    images: [String],
     productTypeImages: [
       {
         unitType: String,  // Loại đóng gói (Lốc, Thùng, Gói...)

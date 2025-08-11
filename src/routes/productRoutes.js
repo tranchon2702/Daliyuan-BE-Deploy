@@ -10,6 +10,7 @@ router.get('/', productController.getProducts);
 router.get('/search', productController.searchProducts);
 router.get('/categories', productController.getCategories);
 router.get('/featured', productController.getFeaturedProducts);
+router.get('/check-code/:code', productController.checkProductCode);
 router.get('/slug/:slug', productController.getProductBySlug);
 router.get('/:id', productController.getProductById);
 

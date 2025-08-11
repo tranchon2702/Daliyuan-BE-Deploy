@@ -23,8 +23,14 @@ const createSlug = (name) => {
 // @access  Public
 const getProducts = async (req, res) => {
   try {
-    const pageSize = 10;
-    const page = Number(req.query.page) || 1;
+    // Giới hạn pageSize để tránh overload (tối đa 100 sản phẩm/trang)
+    let pageSize = Number(req.query.pageSize) || 10;
+    pageSize = Math.min(pageSize, 100); // Giới hạn tối đa 100
+    pageSize = Math.max(pageSize, 5);   // Tối thiểu 5
+    
+    const page = Math.max(Number(req.query.page) || 1, 1); // Tối thiểu trang 1
+    
+
 
     const keyword = req.query.keyword
       ? {
@@ -37,13 +43,40 @@ const getProducts = async (req, res) => {
 
     const category = req.query.category ? { category: req.query.category } : {};
     const mainCategory = req.query.mainCategory ? { mainCategory: req.query.mainCategory } : {};
+    const status = req.query.status ? { status: req.query.status } : {};
     
-    const count = await Product.countDocuments({ ...keyword, ...category, ...mainCategory });
-    const products = await Product.find({ ...keyword, ...category, ...mainCategory })
-      .populate('category', 'name')
-      .limit(pageSize)
-      .skip(pageSize * (page - 1))
-      .sort({ createdAt: -1 });
+    // Thêm filters cho featured flags
+    const isBestSeller = req.query.isBestSeller === 'true' ? { isBestSeller: true } : {};
+    const isNewArrival = req.query.isNewArrival === 'true' ? { isNewArrival: true } : {};
+    const isFeatured = req.query.isFeatured === 'true' ? { isFeatured: true } : {};
+    const isMustTry = req.query.isMustTry === 'true' ? { isMustTry: true } : {};
+    const isTrending = req.query.isTrending === 'true' ? { isTrending: true } : {};
+    
+    const searchQuery = { 
+      ...keyword, 
+      ...category, 
+      ...mainCategory, 
+      ...status,
+      ...isBestSeller,
+      ...isNewArrival,
+      ...isFeatured,
+      ...isMustTry,
+      ...isTrending
+    };
+    
+    // Sử dụng aggregation pipeline để optimize performance
+    const [countResult, products] = await Promise.all([
+      Product.countDocuments(searchQuery),
+      Product.find(searchQuery)
+        .populate('category', 'name slug') // Chỉ lấy fields cần thiết
+        .select('name nameZh code price mainImage status stock createdAt category mainCategory isFeatured') // Chỉ select fields cần thiết
+        .limit(pageSize)
+        .skip(pageSize * (page - 1))
+        .sort({ createdAt: -1 })
+        .lean() // Trả về plain objects thay vì Mongoose documents
+    ]);
+    
+    const count = countResult;
 
     res.json({
       products,
@@ -108,6 +141,8 @@ const createProduct = async (req, res) => {
       nameZh,
       description,
       descriptionZh,
+      shortDescription,
+      shortDescriptionZh,
       price,
       discountPrice,
       stock,
@@ -122,7 +157,36 @@ const createProduct = async (req, res) => {
       isMustTry,
       isNewArrival,
       isTrending,
+      giaGoi,
+      giaThung,
+      giaLoc,
     } = req.body;
+
+    // Tính toán price: ưu tiên field price, nếu không có thì lấy từ đơn vị nhỏ nhất (gói/lốc)
+    let finalPrice = price;
+    if (!price || price === '0' || price === 0 || price === '') {
+      try {
+        const unitOptionsArray = unitOptions ? JSON.parse(unitOptions) : [];
+        // Tìm giá từ đơn vị nhỏ nhất (Gói cho bánh, Lốc cho nước)
+        const smallestUnit = unitOptionsArray.find(unit => 
+          unit.unitType === 'Gói' || unit.unitType === 'Lốc'
+        );
+        if (smallestUnit && smallestUnit.price) {
+          finalPrice = smallestUnit.price;
+          console.log(`Using price from ${smallestUnit.unitType}: ${finalPrice}`);
+        } else if (unitOptionsArray.length > 0) {
+          finalPrice = unitOptionsArray[0].price || 0;
+          console.log(`Using price from first unit option: ${finalPrice}`);
+        } else {
+          finalPrice = 0;
+        }
+      } catch (e) {
+        console.error('Error parsing unitOptions for price:', e);
+        finalPrice = 0;
+      }
+    } else {
+      console.log(`Using provided price: ${finalPrice}`);
+    }
 
     // Tạo slug từ tên sản phẩm
     const slug = createSlug(name);
@@ -155,9 +219,13 @@ const createProduct = async (req, res) => {
     let images = [];
     let imageVariants = [];
 
+    // Logic phân biệt cho createProduct
+    const updateMainImage = req.body.updateMainImage === 'true';
+    const addDetailImages = req.body.addDetailImages === 'true';
+
     if (req.processedImages && req.processedImages.length > 0) {
-      // Sử dụng phiên bản medium webp cho ảnh chính mặc định
-      mainImage = req.processedImages[0].paths.mediumWebp || req.processedImages[0].paths.original;
+      console.log(`Processing ${req.processedImages.length} new images for create`);
+      console.log('updateMainImage:', updateMainImage, 'addDetailImages:', addDetailImages);
       
       // Lưu tất cả các đường dẫn ảnh đã xử lý
       imageVariants = req.processedImages.map(img => ({
@@ -167,16 +235,31 @@ const createProduct = async (req, res) => {
         mediumWebp: img.paths.mediumWebp
       }));
       
-      // Nếu có nhiều ảnh, lưu các ảnh còn lại vào mảng images
-      if (req.processedImages.length > 1) {
-        images = req.processedImages.slice(1).map(img => img.paths.mediumWebp || img.paths.original);
+      // Với createProduct, logic đơn giản hơn
+      if (updateMainImage) {
+        // Ảnh đầu tiên là mainImage
+        mainImage = req.processedImages[0].paths.mediumWebp || req.processedImages[0].paths.original;
+        
+        // Các ảnh còn lại là detail images (nếu có)
+        if (req.processedImages.length > 1 && addDetailImages) {
+          images = req.processedImages.slice(1).map(img => img.paths.mediumWebp || img.paths.original);
+        }
+      } else if (addDetailImages) {
+        // Trường hợp đặc biệt: chỉ có detail images không có main image
+        images = req.processedImages.map(img => img.paths.mediumWebp || img.paths.original);
       }
     } else if (req.files && req.files.length > 0) {
       // Fallback nếu không có processedImages nhưng có files
-      mainImage = `/uploads/images/original/${req.files[0].filename}`;
+      console.log(`Processing ${req.files.length} files for create (fallback)`);
       
-      if (req.files.length > 1) {
-        images = req.files.slice(1).map(file => `/uploads/images/original/${file.filename}`);
+      if (updateMainImage) {
+        mainImage = `/uploads/images/original/${req.files[0].filename}`;
+        
+        if (req.files.length > 1 && addDetailImages) {
+          images = req.files.slice(1).map(file => `/uploads/images/original/${file.filename}`);
+        }
+      } else if (addDetailImages) {
+        images = req.files.map(file => `/uploads/images/original/${file.filename}`);
       }
     } else {
       return res.status(400).json({
@@ -189,9 +272,11 @@ const createProduct = async (req, res) => {
       nameZh,
       description,
       descriptionZh,
+      shortDescription,
+      shortDescriptionZh,
       slug,
       code,
-      price,
+      price: finalPrice,
       discountPrice,
       stock,
       mainImage,
@@ -207,6 +292,9 @@ const createProduct = async (req, res) => {
       isTrending: isTrending === 'true',
       isActive: isActive === 'true',
       tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
+      giaGoi: Number(giaGoi) || 0,
+      giaThung: Number(giaThung) || 0,
+      giaLoc: Number(giaLoc) || 0,
       // Đặt productTypeImages thành mảng rỗng để loại bỏ tính năng này
       productTypeImages: [],
     });
@@ -237,6 +325,8 @@ const updateProduct = async (req, res) => {
       nameZh,
       description,
       descriptionZh,
+      shortDescription,
+      shortDescriptionZh,
       price,
       discountPrice,
       stock,
@@ -251,7 +341,35 @@ const updateProduct = async (req, res) => {
       isMustTry,
       isNewArrival,
       isTrending,
+      giaGoi,
+      giaThung,
+      giaLoc,
     } = req.body;
+
+    // Tính toán price cho update: tương tự như create
+    let finalPrice = price;
+    if (!price || price === '0' || price === 0 || price === '') {
+      try {
+        const unitOptionsArray = unitOptions ? JSON.parse(unitOptions) : [];
+        const smallestUnit = unitOptionsArray.find(unit => 
+          unit.unitType === 'Gói' || unit.unitType === 'Lốc'
+        );
+        if (smallestUnit && smallestUnit.price) {
+          finalPrice = smallestUnit.price;
+          console.log(`Update: Using price from ${smallestUnit.unitType}: ${finalPrice}`);
+        } else if (unitOptionsArray.length > 0) {
+          finalPrice = unitOptionsArray[0].price || 0;
+          console.log(`Update: Using price from first unit option: ${finalPrice}`);
+        } else {
+          finalPrice = 0;
+        }
+      } catch (e) {
+        console.error('Update: Error parsing unitOptions for price:', e);
+        finalPrice = 0;
+      }
+    } else {
+      console.log(`Update: Using provided price: ${finalPrice}`);
+    }
 
     // Tìm sản phẩm hiện tại
     const existingProduct = await Product.findById(id);
@@ -290,9 +408,9 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    // Xử lý ảnh chính và ảnh phụ trong updateProduct
+    // Xử lý ảnh chính và ảnh phụ trong updateProduct - TÁCH RIÊNG
     let mainImage = existingProduct.mainImage;
-    let images = existingProduct.images || [];
+    let images = [...(existingProduct.images || [])]; // Clone existing images
     let imageVariants = existingProduct.imageVariants || [];
 
     console.log('Existing images:', {
@@ -301,27 +419,56 @@ const updateProduct = async (req, res) => {
       imageVariantsCount: imageVariants.length
     });
 
+    // Thêm logic để phân biệt mainImage và detail images dựa trên req.body
+    const updateMainImage = req.body.updateMainImage === 'true';
+    const addDetailImages = req.body.addDetailImages === 'true';
+    
+    // Xử lý danh sách ảnh cần xóa
+    let deletedImages = [];
+    if (req.body.deletedImages) {
+      try {
+        deletedImages = JSON.parse(req.body.deletedImages);
+        console.log('Images to delete:', deletedImages);
+      } catch (error) {
+        console.error('Error parsing deletedImages:', error);
+      }
+    }
+    
+    // Xóa ảnh khỏi images array
+    if (deletedImages.length > 0) {
+      images = images.filter(img => !deletedImages.includes(img));
+      console.log('Updated images after deletion:', images);
+    }
+
     if (req.processedImages && req.processedImages.length > 0) {
       console.log(`Processing ${req.processedImages.length} new images`);
+      console.log('updateMainImage:', updateMainImage, 'addDetailImages:', addDetailImages);
       
-      // Sử dụng phiên bản medium webp cho ảnh chính mặc định
-      mainImage = req.processedImages[0].paths.mediumWebp || req.processedImages[0].paths.original;
+      // CHỈ cập nhật mainImage nếu được yêu cầu
+      if (updateMainImage) {
+        console.log('Updating main image');
+        mainImage = req.processedImages[0].paths.mediumWebp || req.processedImages[0].paths.original;
+        
+        // Nếu có nhiều ảnh và cũng add detail images
+        if (req.processedImages.length > 1 && addDetailImages) {
+          const newDetailImages = req.processedImages.slice(1).map(img => img.paths.mediumWebp || img.paths.original);
+          images = [...images, ...newDetailImages]; // APPEND, không replace
+        }
+      } else if (addDetailImages) {
+        // CHỈ thêm detail images, không đụng mainImage
+        console.log('Adding detail images only');
+        const newDetailImages = req.processedImages.map(img => img.paths.mediumWebp || img.paths.original);
+        images = [...images, ...newDetailImages]; // APPEND, không replace
+      }
       
-      // Lưu tất cả các đường dẫn ảnh đã xử lý
+      // Cập nhật imageVariants cho tất cả ảnh mới
       const newImageVariants = req.processedImages.map(img => ({
         original: img.paths.original,
         webp: img.paths.webp,
         thumbnailWebp: img.paths.thumbnailWebp,
         mediumWebp: img.paths.mediumWebp
       }));
-      
-      // Nếu có nhiều ảnh, lưu các ảnh còn lại vào mảng images
-      if (req.processedImages.length > 1) {
-        images = req.processedImages.slice(1).map(img => img.paths.mediumWebp || img.paths.original);
-      }
-      
-      // Cập nhật thông tin chi tiết về các biến thể ảnh
-      imageVariants = newImageVariants;
+      imageVariants = [...imageVariants, ...newImageVariants];
       
       console.log('Updated images:', {
         mainImage,
@@ -331,11 +478,20 @@ const updateProduct = async (req, res) => {
     } else if (req.files && req.files.length > 0) {
       // Fallback nếu không có processedImages nhưng có files
       console.log(`Processing ${req.files.length} files without processedImages`);
+      console.log('updateMainImage:', updateMainImage, 'addDetailImages:', addDetailImages);
       
-      mainImage = `/uploads/images/original/${req.files[0].filename}`;
-      
-      if (req.files.length > 1) {
-        images = req.files.slice(1).map(file => `/uploads/images/original/${file.filename}`);
+      if (updateMainImage) {
+        console.log('Updating main image (fallback)');
+        mainImage = `/uploads/images/original/${req.files[0].filename}`;
+        
+        if (req.files.length > 1 && addDetailImages) {
+          const newDetailImages = req.files.slice(1).map(file => `/uploads/images/original/${file.filename}`);
+          images = [...images, ...newDetailImages]; // APPEND
+        }
+      } else if (addDetailImages) {
+        console.log('Adding detail images only (fallback)');
+        const newDetailImages = req.files.map(file => `/uploads/images/original/${file.filename}`);
+        images = [...images, ...newDetailImages]; // APPEND
       }
       
       console.log('Updated images (fallback):', {
@@ -361,7 +517,9 @@ const updateProduct = async (req, res) => {
         nameZh,
         description,
         descriptionZh,
-        price,
+        shortDescription,
+        shortDescriptionZh,
+        price: finalPrice,
         discountPrice,
         stock,
         code,
@@ -379,6 +537,9 @@ const updateProduct = async (req, res) => {
         isTrending: isTrending === 'true',
         isActive: isActive === 'true',
         tags: tags ? tags.split(',').map(tag => tag.trim()) : existingProduct.tags,
+        giaGoi: Number(giaGoi) || 0,
+        giaThung: Number(giaThung) || 0,
+        giaLoc: Number(giaLoc) || 0,
         // Đặt productTypeImages thành mảng rỗng để loại bỏ tính năng này
         productTypeImages: [],
       },
@@ -437,7 +598,7 @@ const getFeaturedProducts = async (req, res) => {
 // @access  Public
 const getProductsByCategory = async (req, res) => {
   try {
-    const pageSize = 10;
+    const pageSize = Number(req.query.pageSize) || 10;
     const page = Number(req.query.page) || 1;
 
     const count = await Product.countDocuments({
@@ -465,7 +626,7 @@ const getProductsByCategory = async (req, res) => {
 // @access  Public
 const getProductsByMainCategory = async (req, res) => {
   try {
-    const pageSize = 10;
+    const pageSize = Number(req.query.pageSize) || 10;
     const page = Number(req.query.page) || 1;
 
     const count = await Product.countDocuments({
@@ -598,6 +759,40 @@ const getCategories = async (req, res) => {
   }
 };
 
+// @desc    Kiểm tra mã sản phẩm có trùng lặp không
+// @route   GET /api/products/check-code/:code
+// @access  Public
+const checkProductCode = async (req, res) => {
+  try {
+    const { code } = req.params;
+    const { excludeId } = req.query;
+
+    // Tìm sản phẩm có cùng mã
+    const query = { code: code.toUpperCase() };
+    
+    // Nếu có excludeId (trường hợp edit), loại trừ sản phẩm hiện tại
+    if (excludeId) {
+      query._id = { $ne: excludeId };
+    }
+
+    const existingProduct = await Product.findOne(query);
+    
+    res.json({
+      isDuplicate: !!existingProduct,
+      message: existingProduct 
+        ? `Mã sản phẩm ${code} đã được sử dụng bởi sản phẩm "${existingProduct.name}"` 
+        : `Mã sản phẩm ${code} khả dụng`
+    });
+  } catch (error) {
+    console.error('Lỗi khi kiểm tra mã sản phẩm:', error);
+    res.status(500).json({ 
+      message: 'Lỗi khi kiểm tra mã sản phẩm', 
+      error: error.message,
+      isDuplicate: false // Default là false khi có lỗi
+    });
+  }
+};
+
 module.exports = {
   getProducts,
   getProductById,
@@ -611,4 +806,5 @@ module.exports = {
   createProductReview,
   searchProducts,
   getCategories,
+  checkProductCode,
 }; 
