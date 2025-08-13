@@ -152,6 +152,7 @@ const createProduct = async (req, res) => {
       unitOptions,
       isFeatured,
       isActive,
+      status,
       tags,
       isBestSeller,
       isMustTry,
@@ -291,6 +292,7 @@ const createProduct = async (req, res) => {
       isNewArrival: isNewArrival === 'true',
       isTrending: isTrending === 'true',
       isActive: isActive === 'true',
+      status: status || 'Còn hàng', // Đảm bảo status được set đúng
       tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
       giaGoi: Number(giaGoi) || 0,
       giaThung: Number(giaThung) || 0,

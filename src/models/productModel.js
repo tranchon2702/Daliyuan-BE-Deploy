@@ -171,14 +171,15 @@ const productSchema = mongoose.Schema(
 );
 
 // Middleware để tự động cập nhật trạng thái dựa trên tồn kho
-productSchema.pre('save', function(next) {
-  if (this.stock <= 0) {
-    this.status = 'Hết hàng';
-  } else {
-    this.status = 'Còn hàng';
-  }
-  next();
-});
+// DISABLED: Chúng ta quản lý status thủ công thay vì dựa vào stock
+// productSchema.pre('save', function(next) {
+//   if (this.stock <= 0) {
+//     this.status = 'Hết hàng';
+//   } else {
+//     this.status = 'Còn hàng';
+//   }
+//   next();
+// });
 
 const Product = mongoose.model('Product', productSchema);
 
